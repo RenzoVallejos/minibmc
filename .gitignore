@@ -1,0 +1,6 @@
+# Build artifacts
+minibmc
+*.o
+*.out
+*.log
+
