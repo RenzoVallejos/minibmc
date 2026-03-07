@@ -1,3 +1,8 @@
+/*
+ * hal.h — Hardware Abstraction Layer interface.
+ * Defines the platform-independent API for GPIO, UART, timing, and logging.
+ * Implemented by hal_sim.c (simulation) and hal_rpi4.c (Raspberry Pi 4).
+ */
 #ifndef HAL_H
 #define HAL_H
 

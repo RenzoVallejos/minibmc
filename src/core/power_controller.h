@@ -1,3 +1,8 @@
+/*
+ * power_controller.h — Public API for the power state machine.
+ * Defines the states (OFF, POWERING_ON, ON, SHUTTING_DOWN, ERROR),
+ * the events that drive transitions, and the actions the BMC takes in response.
+ */
 #ifndef POWER_CONTROLLER_H
 #define POWER_CONTROLLER_H
 

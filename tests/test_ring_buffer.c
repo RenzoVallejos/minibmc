@@ -1,3 +1,8 @@
+/*
+ * test_ring_buffer.c — Unit tests for the circular byte buffer.
+ * Tests init, put/get, fill, overflow/overwrite, multi-read, peek,
+ * wraparound, and reset. 8 tests total.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

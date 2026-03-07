@@ -1,3 +1,8 @@
+/*
+ * ring_buffer.h — Public API for the circular byte buffer.
+ * A fixed-size FIFO that overwrites the oldest data when full.
+ * The caller provides the backing array — no dynamic allocation used.
+ */
 #ifndef RING_BUFFER_H
 #define RING_BUFFER_H
 

@@ -1,3 +1,8 @@
+/*
+ * uart.h — UART device and pin definitions for Raspberry Pi 4.
+ * Defines the default serial device path and the GPIO pins used for
+ * TX/RX when connecting to a host's serial console.
+ */
 #ifndef RPI4_UART_H
 #define RPI4_UART_H
 

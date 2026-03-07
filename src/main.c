@@ -1,6 +1,15 @@
+/*
+ * main.c — Entry point for MiniBMC.
+ * Sets up signal handling, initializes the HAL, power controller, and SOL,
+ * then runs the main 100 Hz event loop that drives the power state machine
+ * and polls the serial console.
+ */
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "core/power_controller.h"
 #include "core/sol.h"
@@ -39,6 +48,62 @@ static void bmc_execute_action(PowerAction action) {
         case ACTION_NONE:
             break;
     }
+}
+
+/* Read a command from stdin (non-blocking) and return a PowerEvent (or -1) */
+static int bmc_poll_stdin(PowerController *ctrl) {
+    static char     cmd_buf[64];
+    static size_t   cmd_pos = 0;
+    static int      pending_event = -1;
+    static uint32_t pending_time  = 0;
+
+    /* Fire a pending simulated event after 500ms (e.g. POWER_GOOD after power on) */
+    if (pending_event >= 0 && hal_get_tick_ms() - pending_time >= 500) {
+        int ev = pending_event;
+        pending_event = -1;
+        return ev;
+    }
+
+    char c;
+    while (read(STDIN_FILENO, &c, 1) == 1) {
+        if (c == '\n') {
+            cmd_buf[cmd_pos] = '\0';
+            cmd_pos = 0;
+
+            PowerState state = power_controller_get_state(ctrl);
+
+            if (strcmp(cmd_buf, "power on") == 0) {
+                if (state == STATE_OFF || state == STATE_ERROR) {
+                    /* Schedule POWER_GOOD in 500ms to complete the ON transition */
+                    pending_event = EVENT_POWER_GOOD_RECEIVED;
+                    pending_time  = hal_get_tick_ms();
+                    return EVENT_POWER_BUTTON_PRESSED;
+                } else {
+                    hal_log(HAL_LOG_WARN, "Cannot power on — current state: %s",
+                            state_names[state]);
+                }
+            } else if (strcmp(cmd_buf, "power off") == 0) {
+                if (state == STATE_ON) {
+                    /* Schedule POWER_GOOD (power lost) in 500ms to complete shutdown */
+                    pending_event = EVENT_POWER_GOOD_RECEIVED;
+                    pending_time  = hal_get_tick_ms();
+                    return EVENT_SHUTDOWN_REQUESTED;
+                } else {
+                    hal_log(HAL_LOG_WARN, "Cannot power off — current state: %s",
+                            state_names[state]);
+                }
+            } else if (strcmp(cmd_buf, "status") == 0) {
+                hal_log(HAL_LOG_INFO, "State: %s", state_names[state]);
+            } else if (strlen(cmd_buf) > 0) {
+                hal_log(HAL_LOG_WARN, "Unknown command: '%s' (try: power on, power off, status)",
+                        cmd_buf);
+            }
+        } else {
+            if (cmd_pos < sizeof(cmd_buf) - 1)
+                cmd_buf[cmd_pos++] = c;
+        }
+    }
+    return -1;
 }
 
 /* Poll hardware signals and return a PowerEvent (or -1 for none) */
@@ -88,8 +153,12 @@ int main(void) {
         hal_log(HAL_LOG_WARN, "SOL init failed — continuing without serial capture");
     }
 
+    /* Set stdin non-blocking so command reads don't stall the loop */
+    fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL, 0) | O_NONBLOCK);
+
     hal_log(HAL_LOG_INFO, "MiniBMC started — state: %s",
             state_names[power_controller_get_state(&ctrl)]);
+    hal_log(HAL_LOG_INFO, "Commands: 'power on', 'power off', 'status'");
 
     uint32_t last_heartbeat = hal_get_tick_ms();
     uint32_t poweron_start  = 0;
@@ -121,8 +190,10 @@ int main(void) {
             poweron_start = 0;
         }
 
-        /* Poll for hardware events */
-        int event = bmc_poll_events(&ctrl);
+        /* Poll for hardware events or stdin commands */
+        int event = bmc_poll_stdin(&ctrl);
+        if (event < 0)
+            event = bmc_poll_events(&ctrl);
         if (event >= 0) {
             PowerState old_state = power_controller_get_state(&ctrl);
             PowerAction act = power_controller_handle_event(&ctrl, (PowerEvent)event);
@@ -135,8 +206,8 @@ int main(void) {
             bmc_execute_action(act);
         }
 
-        /* Poll serial console */
-        sol_poll();
+        /* Poll serial console — always capture regardless of power state */
+        sol_poll(true);
 
         hal_delay_ms(LOOP_INTERVAL_MS);
     }

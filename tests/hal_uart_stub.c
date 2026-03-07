@@ -1,3 +1,9 @@
+/*
+ * hal_uart_stub.c — Stub HAL for SOL unit tests.
+ * Replaces the real UART and logging HAL functions with minimal fakes.
+ * Call hal_uart_stub_load() to pre-load bytes the stub will return
+ * one at a time when hal_uart_read_byte() is called.
+ */
 #include "../src/hal/hal.h"
 
 #include <stdio.h>

@@ -1,3 +1,8 @@
+/*
+ * test_power_controller.c — Unit tests for the power state machine.
+ * Covers all state transitions, edge cases, and a full power cycle.
+ * 8 tests total. No external dependencies.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

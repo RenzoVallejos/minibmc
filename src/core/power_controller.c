@@ -1,3 +1,8 @@
+/*
+ * power_controller.c — Power state machine implementation.
+ * Handles events (button press, power good signal, timeout) and transitions
+ * the host through its power states, returning the hardware action to perform.
+ */
 #include <stdio.h>
 #include "power_controller.h"
 

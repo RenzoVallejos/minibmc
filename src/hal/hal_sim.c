@@ -1,3 +1,9 @@
+/*
+ * hal_sim.c — Simulation HAL backend.
+ * GPIO state is kept in memory. UART opens a PTY (pseudo-terminal) so you
+ * can send data to the BMC from another terminal, and feeds fake POST boot
+ * messages automatically once the simulated host is powered on.
+ */
 #include "hal.h"
 
 #include <stdio.h>

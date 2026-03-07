@@ -1,3 +1,9 @@
+/*
+ * test_sol.c — Unit tests for the Serial-Over-LAN module.
+ * Uses a stub HAL (hal_uart_stub.c) to feed pre-loaded bytes instead of
+ * a real UART. Tests capture, available count, overflow, and empty read.
+ * 4 tests total.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +40,7 @@ TEST(test_captures_bytes) {
     sol_init(115200);
     const uint8_t data[] = "Hello\n";
     hal_uart_stub_load(data, sizeof(data) - 1);
-    sol_poll();
+    sol_poll(true);
 
     uint8_t buf[32];
     size_t n = sol_read(buf, sizeof(buf));
@@ -48,7 +54,7 @@ TEST(test_available_count) {
     sol_init(115200);
     const uint8_t data[] = "ABCD";
     hal_uart_stub_load(data, 4);
-    sol_poll();
+    sol_poll(true);
 
     ASSERT_EQ(4, (int)sol_available());
 
@@ -66,7 +72,7 @@ TEST(test_overflow_drops_oldest) {
     for (int i = 0; i < 5000; i++)
         big[i] = (uint8_t)(i & 0xFF);
     hal_uart_stub_load(big, 5000);
-    sol_poll();
+    sol_poll(true);
 
     /* Buffer should be full at 4096 */
     ASSERT_EQ(4096, (int)sol_available());
@@ -83,7 +89,7 @@ TEST(test_overflow_drops_oldest) {
 TEST(test_empty_read) {
     sol_init(115200);
     hal_uart_stub_load(NULL, 0);
-    sol_poll();
+    sol_poll(true);
 
     ASSERT_EQ(0, (int)sol_available());
 

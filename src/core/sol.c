@@ -1,3 +1,9 @@
+/*
+ * sol.c — Serial-Over-LAN console capture implementation.
+ * Reads bytes from the UART (via HAL) into a 4096-byte ring buffer.
+ * Complete lines are logged in real time so the BMC can display host
+ * boot messages (POST output, kernel log, etc.) as they arrive.
+ */
 #include "sol.h"
 #include "ring_buffer.h"
 #include "../hal/hal.h"
@@ -19,9 +25,11 @@ int sol_init(uint32_t baud_rate) {
     return hal_uart_init(baud_rate);
 }
 
-void sol_poll(void) {
+void sol_poll(bool host_is_on) {
     uint8_t byte;
     while (hal_uart_read_byte(&byte)) {
+        if (!host_is_on) continue;  /* drain UART but discard when host is off */
+
         ring_buffer_put(&sol_ring, byte);
 
         if (byte == '\n' || byte == '\r') {

@@ -1,3 +1,8 @@
+/*
+ * ring_buffer.c — Circular byte buffer implementation.
+ * Bytes are written at the head and read from the tail. When the buffer is
+ * full, new writes advance the tail to discard the oldest byte automatically.
+ */
 #include "ring_buffer.h"
 
 void ring_buffer_init(RingBuffer *rb, uint8_t *backing, size_t capacity) {

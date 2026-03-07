@@ -1,3 +1,9 @@
+/*
+ * hal_rpi4.c — Raspberry Pi 4 HAL backend.
+ * GPIO is controlled via memory-mapped BCM2711 registers (/dev/gpiomem).
+ * UART reads from a serial device (default /dev/ttyAMA0, overridden by
+ * the MINIBMC_UART environment variable, e.g. /dev/ttyACM0 for USB serial).
+ */
 #include "hal.h"
 #include "../platform/rpi4/gpio.h"
 #include "../platform/rpi4/uart.h"

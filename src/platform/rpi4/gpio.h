@@ -1,3 +1,8 @@
+/*
+ * gpio.h — BCM2711 GPIO register definitions for Raspberry Pi 4.
+ * Contains register offsets, pin assignments, and inline helpers for
+ * setting pin direction, driving outputs, and reading inputs via mmap.
+ */
 #ifndef RPI4_GPIO_H
 #define RPI4_GPIO_H
 
