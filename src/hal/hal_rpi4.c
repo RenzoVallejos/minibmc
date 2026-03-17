@@ -59,10 +59,11 @@ static void relay_press(void) {
     req.offsets[0] = RPI4_PIN_POWER_BUTTON;
     req.num_lines  = 1;
     strncpy(req.consumer, "minibmc", GPIO_MAX_NAME_SIZE - 1);
+    /* Acquire as OUTPUT HIGH first — matches RPi.GPIO GPIO.setup(17, OUT, initial=HIGH) */
     req.config.flags = GPIO_V2_LINE_FLAG_OUTPUT | GPIO_V2_LINE_FLAG_BIAS_PULL_UP;
     req.config.num_attrs = 1;
     req.config.attrs[0].attr.id     = GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES;
-    req.config.attrs[0].attr.values = 0;   /* LOW = relay active = button pressed */
+    req.config.attrs[0].attr.values = 1;   /* HIGH first */
     req.config.attrs[0].mask        = 1;
 
     if (ioctl(gpiochip_fd, GPIO_V2_GET_LINE_IOCTL, &req) < 0) {
@@ -72,15 +73,27 @@ static void relay_press(void) {
         return;
     }
     relay_fd = req.fd;
+
+    /* Now drive LOW — matches RPi.GPIO GPIO.output(17, LOW) */
+    struct gpio_v2_line_values vals = { .bits = 0, .mask = 1 };
+    if (ioctl(relay_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &vals) < 0) {
+        hal_log(HAL_LOG_WARN, "SET_VALUES LOW failed: %s", strerror(errno));
+    }
     hal_log(HAL_LOG_INFO, "relay pressed (GPIO 17 LOW, fd=%d)", relay_fd);
 }
 
 /* Close the line fd — kernel releases GPIO 17 back to input,
  * GPPUPPDN pull-up holds it HIGH so relay stays inactive. */
 static void relay_release(void) {
-    if (relay_fd    >= 0) { close(relay_fd);    relay_fd    = -1; }
+    if (relay_fd >= 0) {
+        /* Drive HIGH before closing — matches RPi.GPIO GPIO.output(17, HIGH) */
+        struct gpio_v2_line_values vals = { .bits = 1, .mask = 1 };
+        ioctl(relay_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &vals);
+        close(relay_fd);
+        relay_fd = -1;
+    }
     if (gpiochip_fd >= 0) { close(gpiochip_fd); gpiochip_fd = -1; }
-    hal_log(HAL_LOG_INFO, "relay released (GPIO 17 input+pull-up)");
+    hal_log(HAL_LOG_INFO, "relay released (GPIO 17 HIGH)");
 }
 
 int hal_init(void) {
