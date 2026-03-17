@@ -72,6 +72,7 @@ static void relay_press(void) {
         return;
     }
     relay_fd = req.fd;
+    hal_log(HAL_LOG_INFO, "relay pressed (GPIO 17 LOW, fd=%d)", relay_fd);
 }
 
 /* Close the line fd — kernel releases GPIO 17 back to input,
@@ -79,6 +80,7 @@ static void relay_press(void) {
 static void relay_release(void) {
     if (relay_fd    >= 0) { close(relay_fd);    relay_fd    = -1; }
     if (gpiochip_fd >= 0) { close(gpiochip_fd); gpiochip_fd = -1; }
+    hal_log(HAL_LOG_INFO, "relay released (GPIO 17 input+pull-up)");
 }
 
 int hal_init(void) {
