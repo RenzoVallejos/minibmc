@@ -24,10 +24,17 @@
 #define GPSET0              0x1C
 #define GPCLR0              0x28
 #define GPLEV0              0x34
+#define GPPUPPDN0           0xE4    /* Pull-up/down control: GPIO  0-15 */
+#define GPPUPPDN1           0xE8    /* Pull-up/down control: GPIO 16-31 */
 
 /* GPIO function select values */
 #define GPIO_FUNC_INPUT     0x0
 #define GPIO_FUNC_OUTPUT    0x1
+
+/* Pull-up/down values for GPPUPPDN registers */
+#define GPIO_PULL_NONE      0x0
+#define GPIO_PULL_UP        0x1
+#define GPIO_PULL_DOWN      0x2
 
 /* Pin assignments */
 #define RPI4_PIN_POWER_BUTTON   17   /* Input:  momentary push button */
@@ -58,6 +65,17 @@ static inline void rpi4_gpio_clear(volatile uint32_t *base, unsigned pin) {
 
 static inline uint32_t rpi4_gpio_read(volatile uint32_t *base, unsigned pin) {
     return (*(base + GPLEV0 / 4) >> pin) & 1u;
+}
+
+static inline void rpi4_gpio_set_pull(volatile uint32_t *base,
+                                      unsigned pin, unsigned pull) {
+    unsigned reg_off = (pin < 16) ? GPPUPPDN0 : GPPUPPDN1;
+    unsigned shift   = (pin % 16) * 2;
+    volatile uint32_t *reg = (volatile uint32_t *)((uint8_t *)base + reg_off);
+    uint32_t val = *reg;
+    val &= ~(0x3u << shift);
+    val |=  (pull & 0x3u) << shift;
+    *reg = val;
 }
 
 #endif

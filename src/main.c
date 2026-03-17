@@ -38,10 +38,12 @@ static const char *state_names[] = {
 static void bmc_execute_action(PowerAction action) {
     switch (action) {
         case ACTION_ASSERT_POWER_BUTTON:
+            hal_gpio_write(HAL_PIN_POWER_BUTTON, HAL_GPIO_LOW);
             hal_gpio_write(HAL_PIN_POWER_LED, HAL_GPIO_HIGH);
             hal_log(HAL_LOG_INFO, "Action: ASSERT power button");
             break;
         case ACTION_DEASSERT_POWER_BUTTON:
+            hal_gpio_write(HAL_PIN_POWER_BUTTON, HAL_GPIO_HIGH);
             hal_gpio_write(HAL_PIN_POWER_LED, HAL_GPIO_LOW);
             hal_log(HAL_LOG_INFO, "Action: DEASSERT power button");
             break;
@@ -108,27 +110,11 @@ static int bmc_poll_stdin(PowerController *ctrl) {
 
 /* Poll hardware signals and return a PowerEvent (or -1 for none) */
 static int bmc_poll_events(PowerController *ctrl) {
-    PowerState state = power_controller_get_state(ctrl);
-
-    /* Check power button (active high, edge detect via HAL) */
-    if (hal_gpio_read(HAL_PIN_POWER_BUTTON) == HAL_GPIO_HIGH) {
-        if (state == STATE_OFF) {
-            return EVENT_POWER_BUTTON_PRESSED;
-        } else if (state == STATE_ON) {
-            return EVENT_SHUTDOWN_REQUESTED;
-        }
-    }
-
-    /* Check power good signal */
-    HalGpioState pg = hal_gpio_read(HAL_PIN_POWER_GOOD);
-    if (state == STATE_POWERING_ON && pg == HAL_GPIO_HIGH) {
-        return EVENT_POWER_GOOD_RECEIVED;
-    }
-    if (state == STATE_SHUTTING_DOWN && pg == HAL_GPIO_LOW) {
-        return EVENT_POWER_GOOD_RECEIVED;  /* power lost = shutdown complete */
-    }
-
-    return -1;  /* no event */
+    (void)ctrl;
+    /* GPIO 17 is the relay output — not a readable input.
+     * GPIO 18 (POWER_GOOD) is not yet wired.
+     * Events are driven entirely by bmc_poll_stdin until both are wired. */
+    return -1;
 }
 
 int main(void) {

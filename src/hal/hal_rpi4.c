@@ -14,14 +14,18 @@
 #include <string.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 #include <time.h>
 #include <termios.h>
 #include <errno.h>
+#include <linux/gpio.h>
 
 static volatile uint32_t *gpio_base;
-static int mem_fd = -1;
-static int uart_fd = -1;
+static int mem_fd      = -1;
+static int uart_fd     = -1;
+static int gpiochip_fd = -1;   /* /dev/gpiochip0 */
+static int relay_fd    = -1;   /* gpiochip v2 line fd for GPIO 17 */
 static struct timespec start_time;
 
 /* Map logical HAL pins to physical BCM2711 GPIO numbers */
@@ -38,6 +42,44 @@ static const char *level_prefix[] = {
     [HAL_LOG_WARN]  = "WARN",
     [HAL_LOG_ERROR] = "ERROR"
 };
+
+/* Acquire GPIO 17 as OUTPUT LOW — hold fd open so relay stays pressed.
+ * Only called at button press time, not at startup, to avoid glitches. */
+static void relay_press(void) {
+    if (relay_fd >= 0) return;
+
+    gpiochip_fd = open("/dev/gpiochip0", O_RDWR | O_CLOEXEC);
+    if (gpiochip_fd < 0) {
+        hal_log(HAL_LOG_WARN, "open /dev/gpiochip0: %s", strerror(errno));
+        return;
+    }
+
+    struct gpio_v2_line_request req;
+    memset(&req, 0, sizeof(req));
+    req.offsets[0] = RPI4_PIN_POWER_BUTTON;
+    req.num_lines  = 1;
+    strncpy(req.consumer, "minibmc", GPIO_MAX_NAME_SIZE - 1);
+    req.config.flags = GPIO_V2_LINE_FLAG_OUTPUT | GPIO_V2_LINE_FLAG_BIAS_PULL_UP;
+    req.config.num_attrs = 1;
+    req.config.attrs[0].attr.id     = GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES;
+    req.config.attrs[0].attr.values = 0;   /* LOW = relay active = button pressed */
+    req.config.attrs[0].mask        = 1;
+
+    if (ioctl(gpiochip_fd, GPIO_V2_GET_LINE_IOCTL, &req) < 0) {
+        hal_log(HAL_LOG_WARN, "GPIO_V2_GET_LINE_IOCTL: %s", strerror(errno));
+        close(gpiochip_fd);
+        gpiochip_fd = -1;
+        return;
+    }
+    relay_fd = req.fd;
+}
+
+/* Close the line fd — kernel releases GPIO 17 back to input,
+ * GPPUPPDN pull-up holds it HIGH so relay stays inactive. */
+static void relay_release(void) {
+    if (relay_fd    >= 0) { close(relay_fd);    relay_fd    = -1; }
+    if (gpiochip_fd >= 0) { close(gpiochip_fd); gpiochip_fd = -1; }
+}
 
 int hal_init(void) {
     mem_fd = open("/dev/gpiomem", O_RDWR | O_SYNC);
@@ -57,14 +99,16 @@ int hal_init(void) {
     }
 
     /* Configure pin directions */
-    rpi4_gpio_set_function(gpio_base, RPI4_PIN_POWER_BUTTON, GPIO_FUNC_INPUT);
-    rpi4_gpio_set_function(gpio_base, RPI4_PIN_POWER_GOOD,   GPIO_FUNC_INPUT);
-    rpi4_gpio_set_function(gpio_base, RPI4_PIN_POWER_LED,    GPIO_FUNC_OUTPUT);
-    rpi4_gpio_set_function(gpio_base, RPI4_PIN_STATUS_LED,   GPIO_FUNC_OUTPUT);
+    rpi4_gpio_set_function(gpio_base, RPI4_PIN_POWER_GOOD,  GPIO_FUNC_INPUT);
+    rpi4_gpio_set_function(gpio_base, RPI4_PIN_POWER_LED,   GPIO_FUNC_OUTPUT);
+    rpi4_gpio_set_function(gpio_base, RPI4_PIN_STATUS_LED,  GPIO_FUNC_OUTPUT);
 
     /* Start outputs LOW */
     rpi4_gpio_clear(gpio_base, RPI4_PIN_POWER_LED);
     rpi4_gpio_clear(gpio_base, RPI4_PIN_STATUS_LED);
+
+    /* Hardware pull-up on GPIO 17 — holds relay inactive when line fd is closed */
+    rpi4_gpio_set_pull(gpio_base, RPI4_PIN_POWER_BUTTON, GPIO_PULL_UP);
 
     clock_gettime(CLOCK_MONOTONIC, &start_time);
     hal_log(HAL_LOG_INFO, "HAL RPi4 initialized (BCM2711 GPIO)");
@@ -72,11 +116,10 @@ int hal_init(void) {
 }
 
 void hal_shutdown(void) {
+    relay_release();
     if (gpio_base && gpio_base != MAP_FAILED) {
-        /* Turn off outputs */
         rpi4_gpio_clear(gpio_base, RPI4_PIN_POWER_LED);
         rpi4_gpio_clear(gpio_base, RPI4_PIN_STATUS_LED);
-
         munmap((void *)gpio_base, RPI4_GPIO_LEN);
         gpio_base = NULL;
     }
@@ -88,7 +131,15 @@ void hal_shutdown(void) {
 }
 
 void hal_gpio_write(HalGpioPin pin, HalGpioState state) {
-    if (pin >= HAL_PIN_COUNT || !gpio_base) return;
+    if (pin >= HAL_PIN_COUNT) return;
+
+    if (pin == HAL_PIN_POWER_BUTTON) {
+        if (state == HAL_GPIO_LOW) relay_press();
+        else                       relay_release();
+        return;
+    }
+
+    if (!gpio_base) return;
     unsigned hw_pin = pin_map[pin];
     if (state == HAL_GPIO_HIGH) {
         rpi4_gpio_set(gpio_base, hw_pin);
