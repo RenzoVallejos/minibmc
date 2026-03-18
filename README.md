@@ -1,147 +1,231 @@
 # MiniBMC
 
-A minimal Baseboard Management Controller (BMC) implementation featuring a power state machine, Serial-Over-LAN console capture, hardware abstraction layer, and Raspberry Pi 4 GPIO/UART support.
+A Baseboard Management Controller (BMC) firmware implementation written in C, targeting the Raspberry Pi 4 as a management controller for an x86 server (Dell DE051). Implements remote power control, Serial-Over-LAN console capture, an event-driven power state machine, and a platform-independent hardware abstraction layer.
+
+---
+
+## Overview
+
+Modern servers include a dedicated BMC — a microcontroller that manages the host independently of the main CPU. The BMC handles remote power control, hardware monitoring, and out-of-band console access even when the host is powered off or unresponsive.
+
+MiniBMC replicates this architecture using a Raspberry Pi 4 as the management controller. It controls the host's ATX power button via a GPIO-driven relay, captures the host's serial console output (SOL), and exposes a command interface for remote power management.
+
+---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────┐
-│                  main.c                      │
-│           (event loop, signals)              │
-├──────────────┬───────────────┬───────────────┤
-│ power_       │  sol          │     HAL       │
-│ controller   │  (serial      │  (hal.h       │
-│ (state       │   console     │   interface)  │
-│  machine)    │   capture)    │               │
-│              ├───────────────┤               │
-│              │ ring_buffer   ├───────┬───────┤
-│              │ (byte FIFO)   │hal_sim│hal_rpi│
-└──────────────┴───────────────┴───────┴───────┘
+┌─────────────────────────────────────────────────────────┐
+│                        main.c                           │
+│              100 Hz event loop, signal handling         │
+├───────────────────┬─────────────────┬───────────────────┤
+│  power_controller │       sol       │       HAL         │
+│  (state machine)  │  (SOL capture)  │   (hal.h API)     │
+│                   ├─────────────────┤                   │
+│                   │   ring_buffer   ├─────────┬─────────┤
+│                   │   (byte FIFO)   │ hal_sim │hal_rpi4 │
+└───────────────────┴─────────────────┴─────────┴─────────┘
 ```
+
+The core logic (`power_controller`, `sol`, `ring_buffer`) is fully platform-independent. The HAL interface (`hal.h`) abstracts all hardware access — `hal_rpi4.c` implements it for the Pi 4, while `hal_sim.c` implements it for simulation and unit testing on any host machine.
 
 **Power State Machine:**
 ```
-OFF ──[button]──> POWERING_ON ──[power_good]──> ON
- ^                    │                         │
- │                [timeout]                 [shutdown]
- │                    v                         v
- │                  ERROR              SHUTTING_DOWN
- └────────────────[power_lost]──────────────────┘
+        [POWER_BUTTON_PRESSED]
+OFF ──────────────────────────> POWERING_ON ──[POWER_GOOD]──> ON
+ ^                                   │                         │
+ │                               [TIMEOUT]               [SHUTDOWN_REQ]
+ │                                   v                         v
+ │                                 ERROR               SHUTTING_DOWN
+ └───────────────────[POWER_LOST]──────────────────────────────┘
 ```
 
 **SOL Data Flow:**
 ```
-Host UART ──> hal_uart_read_byte() ──> ring_buffer ──> sol_read() / log
-       (or PTY in sim mode)
+Host DB9 serial port
+       │
+  USB-Serial cable
+       │
+  /dev/ttyUSB0
+       │
+  hal_uart_read_byte()     ← HAL reads raw bytes from UART
+       │
+  sol_poll()               ← SOL buffers and outputs bytes
+       │
+  ring_buffer              ← 4096-byte circular buffer
+       │
+  Terminal output          ← host console visible on BMC
 ```
+
+---
+
+## Hardware Setup
+
+### Components
+- Raspberry Pi 4 (BMC)
+- Dell DE051 desktop (managed host)
+- Tolako 1-channel 5V relay module (power button control)
+- USB-to-DB9 serial cable (Serial-Over-LAN)
+
+### Wiring
+
+**Power Button Control (GPIO 17 → Relay → ATX Power Button):**
+```
+RPi4 GPIO17 (pin 11) ──> Relay IN
+RPi4 5V     (pin 2)  ──> Relay VCC
+RPi4 GND    (pin 6)  ──> Relay GND
+Relay NO ──────────────> Dell ATX power button pins
+```
+
+**Serial Console (USB-Serial → Dell DB9):**
+```
+RPi4 USB port ──> USB-Serial adapter ──> Dell DB9 serial port
+                  (/dev/ttyUSB0)
+```
+
+### GPIO Pin Assignments
+
+| Signal        | GPIO | Direction | Description                        |
+|---------------|------|-----------|------------------------------------|
+| POWER_BUTTON  | 17   | Output    | Relay control — ATX power button   |
+| POWER_GOOD    | 18   | Input     | ATX power good signal (not wired yet) |
+| POWER_LED     | 22   | Output    | Power state indicator LED          |
+| STATUS_LED    | 23   | Output    | BMC heartbeat LED                  |
+
+---
 
 ## Project Structure
 
 ```
 minibmc/
 ├── Makefile
-├── README.md
 ├── src/
-│   ├── main.c                  ← event loop + HAL + SOL integration
+│   ├── main.c                  ← event loop, signal handling, stdin command interface
 │   ├── core/
-│   │   ├── power_controller.c  ← power state machine
+│   │   ├── power_controller.c  ← ATX power state machine
 │   │   ├── power_controller.h
-│   │   ├── ring_buffer.c       ← circular byte buffer
+│   │   ├── ring_buffer.c       ← lock-free circular byte buffer
 │   │   ├── ring_buffer.h
 │   │   ├── sol.c               ← Serial-Over-LAN console capture
 │   │   └── sol.h
 │   ├── hal/
 │   │   ├── hal.h               ← platform-independent HAL interface
-│   │   ├── hal_sim.c           ← simulation backend (PTY + fake POST)
-│   │   └── hal_rpi4.c          ← Raspberry Pi 4 backend (GPIO + UART)
+│   │   ├── hal_rpi4.c          ← Raspberry Pi 4 backend (gpiochip v2, UART)
+│   │   └── hal_sim.c           ← simulation backend (PTY + fake POST messages)
 │   └── platform/
 │       └── rpi4/
-│           ├── gpio.h          ← BCM2711 GPIO register definitions
-│           └── uart.h          ← UART device/pin definitions
+│           ├── gpio.h          ← BCM2711 GPIO register definitions and mmap helpers
+│           └── uart.h          ← UART device path
 └── tests/
-    ├── test_power_controller.c ← 8 power state machine tests
-    ├── test_ring_buffer.c      ← 8 ring buffer tests
-    ├── test_sol.c              ← 4 SOL tests
-    └── hal_uart_stub.c         ← stub HAL for SOL tests
+    ├── test_power_controller.c ← 8 power state machine unit tests
+    ├── test_ring_buffer.c      ← 8 ring buffer unit tests
+    ├── test_sol.c              ← 4 SOL unit tests
+    └── hal_uart_stub.c         ← UART stub for SOL tests
 ```
+
+---
 
 ## Build
 
+**Requirements:**
+- Linux or macOS for simulation/tests
+- `gcc` or `aarch64-linux-gnu-gcc` for Pi 4 cross-compilation
+
 ```bash
-# Simulation (default — works on any machine)
-make
-
-# Raspberry Pi 4 (native or cross-compile)
-make PLATFORM=rpi4
-make PLATFORM=rpi4 CC=aarch64-linux-gnu-gcc
-
-# Run unit tests (20 total)
+# Run unit tests (simulation, works on any machine)
 make test
 
-# Clean
+# Build for Raspberry Pi 4 (native on Pi)
+make PLATFORM=rpi4
+
+# Cross-compile for Pi 4 (from x86 Linux)
+make PLATFORM=rpi4 CC=aarch64-linux-gnu-gcc
+
+# Clean build artifacts
 make clean
 ```
 
-## Run
+---
+
+## Usage
+
+**On the Raspberry Pi:**
 
 ```bash
-# Simulation mode — runs event loop with simulated GPIO and serial console
-./minibmc
-# After simulated power-on, fake POST messages scroll automatically
-# Ctrl+C to shut down cleanly
+# Run MiniBMC (MINIBMC_UART overrides the default /dev/ttyAMA0)
+sudo MINIBMC_UART=/dev/ttyUSB0 ./minibmc
 ```
 
-## Serial-Over-LAN (SOL)
+**Available commands (stdin):**
 
-The SOL module captures serial console output from the host system (or simulated POST messages in sim mode) into a 4096-byte ring buffer. Complete lines are logged in real time.
+```
+power on     — assert power button (transitions OFF → POWERING_ON → ON)
+power off    — assert power button (transitions ON → SHUTTING_DOWN → OFF)
+status       — print current power state
+```
 
-**Simulation mode** creates a PTY (pseudo-terminal) on startup. You can interact with it:
+**Example session:**
+
+```
+[  0.000] INFO : HAL RPi4 initialized (BCM2711 GPIO)
+[  0.005] INFO : UART initialized: /dev/ttyUSB0 @ 115200 baud
+[  0.005] INFO : MiniBMC started — state: OFF
+[  0.005] INFO : Commands: 'power on', 'power off', 'status'
+power on
+[  3.210] INFO : State: OFF -> POWERING_ON
+[  3.210] INFO : relay pressed (GPIO 17 HIGH, fd=6)
+[  3.210] INFO : Action: ASSERT power button
+[  3.714] INFO : State: POWERING_ON -> ON
+[  3.714] INFO : relay released (GPIO 17 LOW)
+[  3.714] INFO : Action: DEASSERT power button
+```
+
+---
+
+## Systemd Service
 
 ```bash
-# Start MiniBMC — note the PTY path in the startup log
-./minibmc
-# Output: UART PTY opened: /dev/ttys004
-
-# In another terminal, send data to the PTY
-echo "Hello from host" > /dev/ttys004
-# MiniBMC will display: [SOL] Hello from host
+# Install and enable as a system service
+sudo cp minibmc.service /etc/systemd/system/
+sudo systemctl enable minibmc
+sudo systemctl start minibmc
 ```
 
-Fake POST messages are automatically generated after the simulated power-on, paced at ~1 message per 500ms.
+```ini
+[Unit]
+Description=MiniBMC — Baseboard Management Controller
+After=dev-ttyUSB0.device
+Wants=dev-ttyUSB0.device
 
-**RPi4 mode** opens `/dev/ttyAMA0` at the configured baud rate (default 115200) to capture real serial output from an attached host (e.g., Arduino or another SBC).
+[Service]
+ExecStart=/home/renzoval/minibmc/minibmc
+Environment=MINIBMC_UART=/dev/ttyUSB0
+Restart=on-failure
+User=root
 
-## Pin Assignments (Raspberry Pi 4)
-
-| Signal       | GPIO | BCM Pin | Direction | Description              |
-|-------------|------|---------|-----------|--------------------------|
-| POWER_BUTTON | 17   | GPIO17  | Input     | Momentary push button    |
-| POWER_GOOD   | 18   | GPIO18  | Input     | ATX power good signal    |
-| POWER_LED    | 22   | GPIO22  | Output    | Power indicator LED      |
-| STATUS_LED   | 23   | GPIO23  | Output    | BMC heartbeat LED        |
-| UART_TX      | 14   | GPIO14  | Output    | Serial console TX        |
-| UART_RX      | 15   | GPIO15  | Input     | Serial console RX        |
-
-## Wiring (RPi4)
-
+[Install]
+WantedBy=multi-user.target
 ```
-RPi4 GPIO Header
-─────────────────
-GPIO17 (pin 11) ← Push button → GND (pin 9)
-GPIO18 (pin 12) ← ATX PG signal (active high)
-GPIO22 (pin 15) → 330Ω → LED → GND (power)
-GPIO23 (pin 16) → 330Ω → LED → GND (heartbeat)
-GPIO14 (pin 8)  → Host RX (serial console)
-GPIO15 (pin 10) ← Host TX (serial console)
-```
+
+---
+
+## Roadmap
+
+- [ ] Wire GPIO 18 to ATX POWER_GOOD signal for hardware state detection
+- [ ] Unix domain socket IPC for external command interface
+- [ ] Redfish-compatible REST API (Python/Flask) over the IPC layer
+- [ ] Networked SOL — stream host console over TCP/WebSocket
+- [ ] Hardware monitoring (temperature, fan speed via I2C/SPI)
+- [ ] IPMI over LAN support
+
+---
 
 ## Skills Demonstrated
 
-- **Embedded C**: Bare-metal GPIO/UART register manipulation via mmap
-- **Hardware Abstraction**: Platform-independent HAL enabling simulation and real hardware
-- **State Machine Design**: Event-driven power controller with timeout handling
-- **Ring Buffers**: Lock-free circular buffer for streaming console data
-- **UART/Serial**: Non-blocking serial I/O with PTY simulation
-- **Systems Programming**: Signal handling, memory-mapped I/O, pseudo-terminals
-- **Build Systems**: Makefile with cross-compilation and platform selection
-- **Testing**: 20 unit tests with custom assert framework, no external dependencies
+- **Embedded C** — bare-metal GPIO control via Linux gpiochip v2 API and memory-mapped BCM2711 registers
+- **Hardware Abstraction** — platform-independent HAL enabling identical logic across real hardware and simulation
+- **State Machine Design** — event-driven ATX power controller with timeout and error handling
+- **Systems Programming** — signal handling, mmap I/O, non-blocking UART, pseudo-terminals
+- **Ring Buffer** — circular byte buffer for non-blocking serial data capture
+- **Cross-platform Build** — Makefile with platform selection and cross-compilation support
+- **Unit Testing** — 20 tests with a custom assert framework, zero external dependencies
