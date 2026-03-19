@@ -11,10 +11,15 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <errno.h>
 
 #include "core/power_controller.h"
 #include "core/sol.h"
 #include "hal/hal.h"
+
+#define SOCKET_PATH "/var/run/minibmc.sock"
 
 #define LOOP_INTERVAL_MS    10      /* 100 Hz */
 #define HEARTBEAT_PERIOD_MS 500     /* status LED toggle rate */
@@ -71,12 +76,14 @@ static void bmc_execute_action(PowerAction action) {
     }
 }
 
+/* Shared pending event state — used by both stdin and IPC socket handlers */
+static int      pending_event = -1;
+static uint32_t pending_time  = 0;
+
 /* Read a command from stdin (non-blocking) and return a PowerEvent (or -1) */
 static int bmc_poll_stdin(PowerController *ctrl) {
-    static char     cmd_buf[64];
-    static size_t   cmd_pos = 0;
-    static int      pending_event = -1;
-    static uint32_t pending_time  = 0;
+    static char   cmd_buf[64];
+    static size_t cmd_pos = 0;
 
     /* Fire a pending simulated event after 500ms (e.g. POWER_GOOD after power on) */
     if (pending_event >= 0 && hal_get_tick_ms() - pending_time >= 500) {
@@ -95,7 +102,6 @@ static int bmc_poll_stdin(PowerController *ctrl) {
 
             if (strcmp(cmd_buf, "power on") == 0) {
                 if (state == STATE_OFF || state == STATE_ERROR) {
-                    /* Schedule POWER_GOOD in 500ms to complete the ON transition */
                     pending_event = EVENT_POWER_GOOD_RECEIVED;
                     pending_time  = hal_get_tick_ms();
                     return EVENT_POWER_BUTTON_PRESSED;
@@ -105,7 +111,6 @@ static int bmc_poll_stdin(PowerController *ctrl) {
                 }
             } else if (strcmp(cmd_buf, "power off") == 0) {
                 if (state == STATE_ON) {
-                    /* Schedule POWER_GOOD (power lost) in 500ms to complete shutdown */
                     pending_event = EVENT_POWER_GOOD_RECEIVED;
                     pending_time  = hal_get_tick_ms();
                     return EVENT_SHUTDOWN_REQUESTED;
@@ -123,6 +128,107 @@ static int bmc_poll_stdin(PowerController *ctrl) {
             if (cmd_pos < sizeof(cmd_buf) - 1)
                 cmd_buf[cmd_pos++] = c;
         }
+    }
+    return -1;
+}
+
+/* ---- Unix socket IPC ---- */
+
+static int ipc_server_fd = -1;
+static int ipc_client_fd = -1;
+
+static int ipc_init(void) {
+    ipc_server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (ipc_server_fd < 0) {
+        hal_log(HAL_LOG_ERROR, "ipc socket: %s", strerror(errno));
+        return -1;
+    }
+    fcntl(ipc_server_fd, F_SETFL, O_NONBLOCK);
+
+    unlink(SOCKET_PATH);
+    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+
+    if (bind(ipc_server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+        listen(ipc_server_fd, 4) < 0) {
+        hal_log(HAL_LOG_ERROR, "ipc bind/listen: %s", strerror(errno));
+        close(ipc_server_fd);
+        ipc_server_fd = -1;
+        return -1;
+    }
+    chmod(SOCKET_PATH, 0660);
+    hal_log(HAL_LOG_INFO, "IPC socket: %s", SOCKET_PATH);
+    return 0;
+}
+
+static void ipc_shutdown(void) {
+    if (ipc_client_fd >= 0) { close(ipc_client_fd); ipc_client_fd = -1; }
+    if (ipc_server_fd >= 0) { close(ipc_server_fd); ipc_server_fd = -1; }
+    unlink(SOCKET_PATH);
+}
+
+/* Process a command string, write response to fd, return PowerEvent or -1 */
+static int ipc_handle_command(const char *cmd, int fd,
+                              PowerController *ctrl,
+                              int *pending_event, uint32_t *pending_time) {
+    PowerState state = power_controller_get_state(ctrl);
+
+    if (strcmp(cmd, "power on") == 0) {
+        if (state == STATE_OFF || state == STATE_ERROR) {
+            *pending_event = EVENT_POWER_GOOD_RECEIVED;
+            *pending_time  = hal_get_tick_ms();
+            dprintf(fd, "OK\n");
+            return EVENT_POWER_BUTTON_PRESSED;
+        }
+        dprintf(fd, "ERROR:Cannot power on — state: %s\n", state_names[state]);
+    } else if (strcmp(cmd, "power off") == 0) {
+        if (state == STATE_ON) {
+            *pending_event = EVENT_POWER_GOOD_RECEIVED;
+            *pending_time  = hal_get_tick_ms();
+            dprintf(fd, "OK\n");
+            return EVENT_SHUTDOWN_REQUESTED;
+        }
+        dprintf(fd, "ERROR:Cannot power off — state: %s\n", state_names[state]);
+    } else if (strcmp(cmd, "status") == 0) {
+        dprintf(fd, "STATE:%s\n", state_names[state]);
+    } else {
+        dprintf(fd, "ERROR:Unknown command\n");
+    }
+    return -1;
+}
+
+static int ipc_poll(PowerController *ctrl,
+                    int *pending_event, uint32_t *pending_time) {
+    /* Accept new client if none connected */
+    if (ipc_client_fd < 0 && ipc_server_fd >= 0) {
+        ipc_client_fd = accept(ipc_server_fd, NULL, NULL);
+        if (ipc_client_fd >= 0)
+            fcntl(ipc_client_fd, F_SETFL, O_NONBLOCK);
+    }
+    if (ipc_client_fd < 0) return -1;
+
+    /* Read a command line from the client */
+    static char   buf[64];
+    static size_t pos = 0;
+    char c;
+    ssize_t n;
+
+    while ((n = read(ipc_client_fd, &c, 1)) == 1) {
+        if (c == '\n') {
+            buf[pos] = '\0';
+            pos = 0;
+            int ev = ipc_handle_command(buf, ipc_client_fd, ctrl,
+                                        pending_event, pending_time);
+            return ev;
+        } else if (pos < sizeof(buf) - 1) {
+            buf[pos++] = c;
+        }
+    }
+    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        /* Client disconnected */
+        close(ipc_client_fd);
+        ipc_client_fd = -1;
+        pos = 0;
     }
     return -1;
 }
@@ -157,6 +263,11 @@ int main(void) {
     /* Initialize Serial-Over-LAN */
     if (sol_init(115200) != 0) {
         hal_log(HAL_LOG_WARN, "SOL init failed — continuing without serial capture");
+    }
+
+    /* Initialize IPC socket for Redfish API */
+    if (ipc_init() != 0) {
+        hal_log(HAL_LOG_WARN, "IPC socket init failed — continuing without API socket");
     }
 
     /* Set stdin non-blocking so command reads don't stall the loop */
@@ -197,8 +308,10 @@ int main(void) {
             poweron_start = 0;
         }
 
-        /* Poll for hardware events or stdin commands */
+        /* Poll for events: stdin, IPC socket, hardware */
         int event = bmc_poll_stdin(&ctrl);
+        if (event < 0)
+            event = ipc_poll(&ctrl, &pending_event, &pending_time);
         if (event < 0)
             event = bmc_poll_events(&ctrl);
         if (event >= 0) {
@@ -221,6 +334,7 @@ int main(void) {
     }
 
     hal_log(HAL_LOG_INFO, "MiniBMC shutting down");
+    ipc_shutdown();
     sol_shutdown();
     hal_gpio_write(HAL_PIN_POWER_LED,  HAL_GPIO_LOW);
     hal_gpio_write(HAL_PIN_STATUS_LED, HAL_GPIO_LOW);
