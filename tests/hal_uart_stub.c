@@ -51,3 +51,7 @@ void hal_log(HalLogLevel level, const char *fmt, ...) {
     (void)fmt;
     /* silent in tests */
 }
+
+uint32_t hal_get_tick_ms(void) {
+    return 0;   /* always returns 0 — flush timeout never triggers in tests */
+}
