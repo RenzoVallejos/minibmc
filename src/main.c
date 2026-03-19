@@ -10,6 +10,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "core/power_controller.h"
 #include "core/sol.h"
@@ -18,6 +19,24 @@
 #define LOOP_INTERVAL_MS    10      /* 100 Hz */
 #define HEARTBEAT_PERIOD_MS 500     /* status LED toggle rate */
 #define POWERON_TIMEOUT_MS  5000    /* power-good wait limit */
+
+#define STATE_FILE          "/var/lib/minibmc/state"
+
+static void state_save(PowerState s) {
+    mkdir("/var/lib/minibmc", 0755);
+    FILE *f = fopen(STATE_FILE, "w");
+    if (f) { fprintf(f, "%d\n", (int)s); fclose(f); }
+}
+
+static PowerState state_load(void) {
+    FILE *f = fopen(STATE_FILE, "r");
+    if (!f) return STATE_OFF;
+    int v = STATE_OFF;
+    fscanf(f, "%d", &v);
+    fclose(f);
+    if (v < 0 || v >= STATE_ERROR) return STATE_OFF;
+    return (PowerState)v;
+}
 
 static volatile sig_atomic_t running = 1;
 
@@ -130,9 +149,10 @@ int main(void) {
         return 1;
     }
 
-    /* Initialize power controller */
+    /* Initialize power controller and restore last known state */
     PowerController ctrl;
     power_controller_init(&ctrl);
+    ctrl.current_state = state_load();
 
     /* Initialize Serial-Over-LAN */
     if (sol_init(115200) != 0) {
@@ -142,8 +162,9 @@ int main(void) {
     /* Set stdin non-blocking so command reads don't stall the loop */
     fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL, 0) | O_NONBLOCK);
 
-    hal_log(HAL_LOG_INFO, "MiniBMC started — state: %s",
-            state_names[power_controller_get_state(&ctrl)]);
+    hal_log(HAL_LOG_INFO, "MiniBMC started — state: %s%s",
+            state_names[power_controller_get_state(&ctrl)],
+            power_controller_get_state(&ctrl) != STATE_OFF ? " (restored)" : "");
     hal_log(HAL_LOG_INFO, "Commands: 'power on', 'power off', 'status'");
 
     uint32_t last_heartbeat = hal_get_tick_ms();
@@ -188,6 +209,7 @@ int main(void) {
             if (old_state != new_state) {
                 hal_log(HAL_LOG_INFO, "State: %s -> %s",
                         state_names[old_state], state_names[new_state]);
+                state_save(new_state);
             }
             bmc_execute_action(act);
         }
