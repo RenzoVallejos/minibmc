@@ -1,0 +1,14 @@
+[Unit]
+Description=MiniBMC — Baseboard Management Controller
+After=dev-ttyUSB0.device
+Wants=dev-ttyUSB0.device
+
+[Service]
+ExecStart=/home/renzoval/minibmc/minibmc
+Environment=MINIBMC_UART=/dev/ttyUSB0
+Restart=on-failure
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
