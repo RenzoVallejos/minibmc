@@ -10,24 +10,30 @@
 
 #include <string.h>
 
-#define SOL_BUFFER_SIZE  4096
-#define SOL_LINE_MAX     256
+#define SOL_BUFFER_SIZE     4096
+#define SOL_LINE_MAX        256
+#define SOL_FLUSH_TIMEOUT   200   /* ms — flush partial line if no new bytes arrive */
 
 static uint8_t    sol_backing[SOL_BUFFER_SIZE];
 static RingBuffer sol_ring;
 
-static char    line_buf[SOL_LINE_MAX];
-static size_t  line_pos;
+static char     line_buf[SOL_LINE_MAX];
+static size_t   line_pos;
+static uint32_t last_byte_time;
 
 int sol_init(uint32_t baud_rate) {
     ring_buffer_init(&sol_ring, sol_backing, SOL_BUFFER_SIZE);
     line_pos = 0;
+    last_byte_time = 0;
     return hal_uart_init(baud_rate);
 }
 
 void sol_poll(bool host_is_on) {
     uint8_t byte;
+    bool got_byte = false;
+
     while (hal_uart_read_byte(&byte)) {
+        got_byte = true;
         if (!host_is_on) continue;  /* drain UART but discard when host is off */
 
         ring_buffer_put(&sol_ring, byte);
@@ -39,10 +45,22 @@ void sol_poll(bool host_is_on) {
                 line_pos = 0;
             }
         } else {
-            if (line_pos < SOL_LINE_MAX - 1) {
+            if (line_pos < SOL_LINE_MAX - 1)
                 line_buf[line_pos++] = (char)byte;
-            }
         }
+    }
+
+    if (got_byte) {
+        last_byte_time = hal_get_tick_ms();
+    }
+
+    /* Flush partial line (e.g. "login:") if no new bytes for SOL_FLUSH_TIMEOUT ms */
+    if (line_pos > 0 && last_byte_time > 0 &&
+        hal_get_tick_ms() - last_byte_time >= SOL_FLUSH_TIMEOUT) {
+        line_buf[line_pos] = '\0';
+        hal_log(HAL_LOG_INFO, "[SOL] %s", line_buf);
+        line_pos = 0;
+        last_byte_time = 0;
     }
 }
 
