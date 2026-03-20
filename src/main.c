@@ -19,7 +19,8 @@
 #include "core/sol.h"
 #include "hal/hal.h"
 
-#define SOCKET_PATH "/var/run/minibmc.sock"
+#define SOCKET_PATH     "/var/run/minibmc.sock"
+#define SOL_SOCKET_PATH "/var/run/minibmc-sol.sock"
 
 #define LOOP_INTERVAL_MS    10      /* 100 Hz */
 #define HEARTBEAT_PERIOD_MS 500     /* status LED toggle rate */
@@ -233,6 +234,68 @@ static int ipc_poll(PowerController *ctrl,
     return -1;
 }
 
+/* ---- SOL Unix socket (bidirectional console forwarding) ---- */
+
+static int sol_server_fd = -1;
+static int sol_sock_client_fd = -1;
+
+static int sol_socket_init(void) {
+    sol_server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sol_server_fd < 0) {
+        hal_log(HAL_LOG_ERROR, "sol socket: %s", strerror(errno));
+        return -1;
+    }
+    fcntl(sol_server_fd, F_SETFL, O_NONBLOCK);
+
+    unlink(SOL_SOCKET_PATH);
+    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+    strncpy(addr.sun_path, SOL_SOCKET_PATH, sizeof(addr.sun_path) - 1);
+
+    if (bind(sol_server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+        listen(sol_server_fd, 4) < 0) {
+        hal_log(HAL_LOG_ERROR, "sol bind/listen: %s", strerror(errno));
+        close(sol_server_fd);
+        sol_server_fd = -1;
+        return -1;
+    }
+    chmod(SOL_SOCKET_PATH, 0660);
+    hal_log(HAL_LOG_INFO, "SOL socket: %s", SOL_SOCKET_PATH);
+    return 0;
+}
+
+static void sol_socket_shutdown(void) {
+    sol_set_client(-1);
+    if (sol_sock_client_fd >= 0) { close(sol_sock_client_fd); sol_sock_client_fd = -1; }
+    if (sol_server_fd    >= 0) { close(sol_server_fd);    sol_server_fd    = -1; }
+    unlink(SOL_SOCKET_PATH);
+}
+
+/* Accept new SOL clients; forward keystrokes from client → UART */
+static void sol_socket_poll(void) {
+    if (sol_sock_client_fd < 0 && sol_server_fd >= 0) {
+        sol_sock_client_fd = accept(sol_server_fd, NULL, NULL);
+        if (sol_sock_client_fd >= 0) {
+            fcntl(sol_sock_client_fd, F_SETFL, O_NONBLOCK);
+            sol_set_client(sol_sock_client_fd);
+            hal_log(HAL_LOG_INFO, "SOL client connected");
+        }
+    }
+    if (sol_sock_client_fd < 0) return;
+
+    /* Read keystrokes from the client and write them to the host UART */
+    uint8_t buf[64];
+    ssize_t n = read(sol_sock_client_fd, buf, sizeof(buf));
+    if (n > 0) {
+        for (ssize_t i = 0; i < n; i++)
+            hal_uart_write_byte(buf[i]);
+    } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        close(sol_sock_client_fd);
+        sol_sock_client_fd = -1;
+        sol_set_client(-1);
+        hal_log(HAL_LOG_INFO, "SOL client disconnected");
+    }
+}
+
 /* Poll hardware signals and return a PowerEvent (or -1 for none) */
 static int bmc_poll_events(PowerController *ctrl) {
     (void)ctrl;
@@ -268,6 +331,11 @@ int main(void) {
     /* Initialize IPC socket for Redfish API */
     if (ipc_init() != 0) {
         hal_log(HAL_LOG_WARN, "IPC socket init failed — continuing without API socket");
+    }
+
+    /* Initialize SOL socket for WebSocket console access */
+    if (sol_socket_init() != 0) {
+        hal_log(HAL_LOG_WARN, "SOL socket init failed — continuing without SOL socket");
     }
 
     /* Set stdin non-blocking so command reads don't stall the loop */
@@ -327,6 +395,9 @@ int main(void) {
             bmc_execute_action(act);
         }
 
+        /* Poll SOL socket — accept clients, forward keystrokes to UART */
+        sol_socket_poll();
+
         /* Poll serial console — always capture regardless of power state */
         sol_poll(true);
 
@@ -335,6 +406,7 @@ int main(void) {
 
     hal_log(HAL_LOG_INFO, "MiniBMC shutting down");
     ipc_shutdown();
+    sol_socket_shutdown();
     sol_shutdown();
     hal_gpio_write(HAL_PIN_POWER_LED,  HAL_GPIO_LOW);
     hal_gpio_write(HAL_PIN_STATUS_LED, HAL_GPIO_LOW);

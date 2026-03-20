@@ -8,7 +8,9 @@
 #include "ring_buffer.h"
 #include "../hal/hal.h"
 
+#include <errno.h>
 #include <string.h>
+#include <unistd.h>
 
 #define SOL_BUFFER_SIZE     4096
 #define SOL_LINE_MAX        256
@@ -20,6 +22,11 @@ static RingBuffer sol_ring;
 static char     line_buf[SOL_LINE_MAX];
 static size_t   line_pos;
 static uint32_t last_byte_time;
+static int      sol_client_fd = -1;
+
+void sol_set_client(int fd) {
+    sol_client_fd = fd;
+}
 
 int sol_init(uint32_t baud_rate) {
     ring_buffer_init(&sol_ring, sol_backing, SOL_BUFFER_SIZE);
@@ -37,6 +44,13 @@ void sol_poll(bool host_is_on) {
         if (!host_is_on) continue;  /* drain UART but discard when host is off */
 
         ring_buffer_put(&sol_ring, byte);
+
+        /* Forward live to any connected SOL socket client */
+        if (sol_client_fd >= 0) {
+            if (write(sol_client_fd, &byte, 1) < 0 &&
+                errno != EAGAIN && errno != EWOULDBLOCK)
+                sol_client_fd = -1;
+        }
 
         if (byte == '\n' || byte == '\r') {
             if (line_pos > 0) {
@@ -108,6 +122,7 @@ void sol_dump(void) {
 }
 
 void sol_shutdown(void) {
+    sol_client_fd = -1;
     hal_uart_shutdown();
     ring_buffer_reset(&sol_ring);
     line_pos = 0;

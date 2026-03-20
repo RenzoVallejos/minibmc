@@ -3,11 +3,13 @@ MiniBMC Redfish API
 Exposes Redfish-compatible endpoints for power control of the managed host.
 Communicates with the minibmc C daemon via Unix domain socket.
 """
+import asyncio
 import socket
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-SOCKET_PATH = "/var/run/minibmc.sock"
+SOCKET_PATH     = "/var/run/minibmc.sock"
+SOL_SOCKET_PATH = "/var/run/minibmc-sol.sock"
 
 app = FastAPI(
     title="MiniBMC Redfish API",
@@ -112,3 +114,43 @@ def reset_system(action: ResetAction):
 
     if response.startswith("ERROR"):
         raise HTTPException(status_code=409, detail=response.replace("ERROR:", ""))
+
+
+# ---------------------------------------------------------------------------
+# SOL WebSocket — bidirectional serial console over WebSocket
+# ---------------------------------------------------------------------------
+
+@app.websocket("/redfish/v1/Systems/1/SOL")
+async def sol_websocket(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        reader, writer = await asyncio.open_unix_connection(SOL_SOCKET_PATH)
+    except OSError:
+        await websocket.close(code=1011, reason="SOL unavailable")
+        return
+
+    async def unix_to_ws():
+        try:
+            while True:
+                data = await reader.read(256)
+                if not data:
+                    break
+                await websocket.send_text(data.decode(errors="replace"))
+        except Exception:
+            pass
+
+    async def ws_to_unix():
+        try:
+            while True:
+                data = await websocket.receive_text()
+                writer.write(data.encode())
+                await writer.drain()
+        except (WebSocketDisconnect, Exception):
+            pass
+
+    try:
+        await asyncio.gather(unix_to_ws(), ws_to_unix())
+    except Exception:
+        pass
+    finally:
+        writer.close()

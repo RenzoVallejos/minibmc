@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 int    sol_init(uint32_t baud_rate);
+void   sol_set_client(int fd);   /* fd < 0 clears; bytes forwarded live to this fd */
 void   sol_poll(bool host_is_on);
 size_t sol_read(uint8_t *dst, size_t max_len);
 size_t sol_available(void);
