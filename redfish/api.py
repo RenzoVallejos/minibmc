@@ -145,8 +145,7 @@ async def sol_websocket(websocket: WebSocket):
         try:
             while True:
                 data = await websocket.receive_text()
-                # Serial consoles expect CR (\r), not LF (\n)
-                writer.write(data.replace("\n", "\r").encode())
+                writer.write(data.encode())
                 await writer.drain()
         except asyncio.CancelledError:
             raise
