@@ -145,7 +145,7 @@ async def sol_websocket(websocket: WebSocket):
         try:
             while True:
                 data = await websocket.receive_text()
-                writer.write(data.replace("\n", "\r\n").encode())
+                writer.write(data.encode() + b"\r")
                 await writer.drain()
         except asyncio.CancelledError:
             raise

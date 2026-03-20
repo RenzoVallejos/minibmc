@@ -286,12 +286,6 @@ static void sol_socket_poll(void) {
     uint8_t buf[64];
     ssize_t n = read(sol_sock_client_fd, buf, sizeof(buf));
     if (n > 0) {
-        hal_log(HAL_LOG_INFO, "SOL TX %zd bytes to UART: %02X %02X %02X %02X",
-                n,
-                n > 0 ? buf[0] : 0,
-                n > 1 ? buf[1] : 0,
-                n > 2 ? buf[2] : 0,
-                n > 3 ? buf[3] : 0);
         for (ssize_t i = 0; i < n; i++)
             hal_uart_write_byte(buf[i]);
     } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
