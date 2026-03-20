@@ -136,6 +136,8 @@ async def sol_websocket(websocket: WebSocket):
                 if not data:
                     break
                 await websocket.send_text(data.decode(errors="replace"))
+        except asyncio.CancelledError:
+            raise
         except Exception:
             pass
 
@@ -146,12 +148,16 @@ async def sol_websocket(websocket: WebSocket):
                 # Serial consoles expect CR (\r), not LF (\n)
                 writer.write(data.replace("\n", "\r").encode())
                 await writer.drain()
+        except asyncio.CancelledError:
+            raise
         except (WebSocketDisconnect, Exception):
             pass
 
+    tasks = [asyncio.create_task(unix_to_ws()), asyncio.create_task(ws_to_unix())]
     try:
-        await asyncio.gather(unix_to_ws(), ws_to_unix())
-    except Exception:
-        pass
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         writer.close()
