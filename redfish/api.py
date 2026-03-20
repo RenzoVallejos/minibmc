@@ -135,7 +135,7 @@ async def sol_websocket(websocket: WebSocket):
                 data = await reader.read(256)
                 if not data:
                     break
-                await websocket.send_text(data.decode(errors="replace"))
+                await websocket.send_bytes(data)
         except asyncio.CancelledError:
             raise
         except Exception:
