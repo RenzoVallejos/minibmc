@@ -143,7 +143,8 @@ async def sol_websocket(websocket: WebSocket):
         try:
             while True:
                 data = await websocket.receive_text()
-                writer.write(data.encode())
+                # Serial consoles expect CR (\r), not LF (\n)
+                writer.write(data.replace("\n", "\r").encode())
                 await writer.drain()
         except (WebSocketDisconnect, Exception):
             pass
