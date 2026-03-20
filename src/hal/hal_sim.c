@@ -4,6 +4,7 @@
  * can send data to the BMC from another terminal, and feeds fake POST boot
  * messages automatically once the simulated host is powered on.
  */
+#define _GNU_SOURCE   /* posix_openpt, grantpt, unlockpt, ptsname on Linux */
 #include "hal.h"
 
 #include <stdio.h>
