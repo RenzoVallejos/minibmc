@@ -5,6 +5,8 @@ Communicates with the minibmc C daemon via Unix domain socket.
 """
 import asyncio
 import socket
+import threading
+import time
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
@@ -89,6 +91,7 @@ def get_system():
                     "On",
                     "GracefulShutdown",
                     "ForceOff",
+                    "ForceRestart",
                 ],
             }
         },
@@ -99,17 +102,33 @@ class ResetAction(BaseModel):
     ResetType: str
 
 
+def _power_on_after_shutdown():
+    time.sleep(10)
+    try:
+        send_command("power on")
+    except Exception:
+        pass
+
+
 @app.post("/redfish/v1/Systems/1/Actions/ComputerSystem.Reset", status_code=204)
 def reset_system(action: ResetAction):
     if action.ResetType == "On":
         response = send_command("power on")
     elif action.ResetType in ("GracefulShutdown", "ForceOff"):
         response = send_command("power off")
+    elif action.ResetType == "ForceRestart":
+        if get_power_state() != "On":
+            raise HTTPException(status_code=409, detail="Cannot power cycle — host is not on")
+        response = send_command("power off")
+        if response.startswith("ERROR"):
+            raise HTTPException(status_code=409, detail=response.replace("ERROR:", ""))
+        threading.Thread(target=_power_on_after_shutdown, daemon=True).start()
+        return
     else:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported ResetType: {action.ResetType}. "
-                   f"Allowed: On, GracefulShutdown, ForceOff",
+                   f"Allowed: On, GracefulShutdown, ForceOff, ForceRestart",
         )
 
     if response.startswith("ERROR"):
