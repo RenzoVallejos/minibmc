@@ -1,6 +1,6 @@
 # MiniBMC
 
-A Baseboard Management Controller (BMC) firmware implementation written in C, targeting the Raspberry Pi 4 as a management controller for an x86 server (Dell DE051). Implements remote power control, Serial-Over-LAN console capture, an event-driven power state machine, and a platform-independent hardware abstraction layer.
+A Baseboard Management Controller (BMC) firmware implementation written in C, targeting the Raspberry Pi 4 as a management controller for an x86 server (Dell DE051). Implements remote power control, Serial-Over-LAN console access, a Redfish-compatible REST API, and a platform-independent hardware abstraction layer.
 
 ---
 
@@ -8,7 +8,7 @@ A Baseboard Management Controller (BMC) firmware implementation written in C, ta
 
 Modern servers include a dedicated BMC — a microcontroller that manages the host independently of the main CPU. The BMC handles remote power control, hardware monitoring, and out-of-band console access even when the host is powered off or unresponsive.
 
-MiniBMC replicates this architecture using a Raspberry Pi 4 as the management controller. It controls the host's ATX power button via a GPIO-driven relay, captures the host's serial console output (SOL), and exposes a command interface for remote power management.
+MiniBMC replicates this architecture using a Raspberry Pi 4 as the management controller. It controls the host's ATX power button via a GPIO-driven relay, captures the host's serial console output (SOL), and exposes a Redfish-compatible REST API and WebSocket console for remote management.
 
 ---
 
@@ -24,10 +24,20 @@ MiniBMC replicates this architecture using a Raspberry Pi 4 as the management co
 │                   ├─────────────────┤                   │
 │                   │   ring_buffer   ├─────────┬─────────┤
 │                   │   (byte FIFO)   │ hal_sim │hal_rpi4 │
-└───────────────────┴─────────────────┴─────────┴─────────┘
+└───────────────────┴────────┬────────┴─────────┴─────────┘
+                             │ Unix sockets
+              ┌──────────────┴──────────────┐
+              │       redfish/api.py        │
+              │   FastAPI + uvicorn         │
+              │   REST API + WebSocket SOL  │
+              └─────────────────────────────┘
 ```
 
 The core logic (`power_controller`, `sol`, `ring_buffer`) is fully platform-independent. The HAL interface (`hal.h`) abstracts all hardware access — `hal_rpi4.c` implements it for the Pi 4, while `hal_sim.c` implements it for simulation and unit testing on any host machine.
+
+The C daemon communicates with the Python API via two Unix domain sockets:
+- `/var/run/minibmc.sock` — power control IPC
+- `/var/run/minibmc-sol.sock` — bidirectional serial console
 
 **Power State Machine:**
 ```
@@ -48,13 +58,15 @@ Host DB9 serial port
        │
   /dev/ttyUSB0
        │
-  hal_uart_read_byte()     ← HAL reads raw bytes from UART
+  hal_uart_read_byte()         ← HAL reads raw bytes from UART
        │
-  sol_poll()               ← SOL buffers and outputs bytes
+  sol_poll()                   ← SOL buffers bytes and forwards to client
        │
-  ring_buffer              ← 4096-byte circular buffer
+  /var/run/minibmc-sol.sock    ← Unix socket to Python API
        │
-  Terminal output          ← host console visible on BMC
+  WebSocket /redfish/v1/Systems/1/SOL
+       │
+  sol-terminal.py              ← raw-mode terminal client
 ```
 
 ---
@@ -85,12 +97,12 @@ RPi4 USB port ──> USB-Serial adapter ──> Dell DB9 serial port
 
 ### GPIO Pin Assignments
 
-| Signal        | GPIO | Direction | Description                        |
-|---------------|------|-----------|------------------------------------|
-| POWER_BUTTON  | 17   | Output    | Relay control — ATX power button   |
+| Signal        | GPIO | Direction | Description                           |
+|---------------|------|-----------|---------------------------------------|
+| POWER_BUTTON  | 17   | Output    | Relay control — ATX power button      |
 | POWER_GOOD    | 18   | Input     | ATX power good signal (not wired yet) |
-| POWER_LED     | 22   | Output    | Power state indicator LED          |
-| STATUS_LED    | 23   | Output    | BMC heartbeat LED                  |
+| POWER_LED     | 22   | Output    | Power state indicator LED             |
+| STATUS_LED    | 23   | Output    | BMC heartbeat LED                     |
 
 ---
 
@@ -100,7 +112,7 @@ RPi4 USB port ──> USB-Serial adapter ──> Dell DB9 serial port
 minibmc/
 ├── Makefile
 ├── src/
-│   ├── main.c                  ← event loop, signal handling, stdin command interface
+│   ├── main.c                  ← event loop, IPC sockets, SOL socket, signal handling
 │   ├── core/
 │   │   ├── power_controller.c  ← ATX power state machine
 │   │   ├── power_controller.h
@@ -116,6 +128,10 @@ minibmc/
 │       └── rpi4/
 │           ├── gpio.h          ← BCM2711 GPIO register definitions and mmap helpers
 │           └── uart.h          ← UART device path
+├── redfish/
+│   ├── api.py                  ← FastAPI Redfish REST API + WebSocket SOL endpoint
+│   ├── sol-terminal.py         ← raw-mode terminal client for SOL
+│   └── requirements.txt
 └── tests/
     ├── test_power_controller.c ← 8 power state machine unit tests
     ├── test_ring_buffer.c      ← 8 ring buffer unit tests
@@ -149,62 +165,49 @@ make clean
 
 ## Usage
 
-**On the Raspberry Pi:**
+### Power Control
 
 ```bash
-# Run MiniBMC (MINIBMC_UART overrides the default /dev/ttyAMA0)
-sudo MINIBMC_UART=/dev/ttyUSB0 ./minibmc
+# Power on
+curl -X POST http://10.0.0.136:8000/redfish/v1/Systems/1/Actions/ComputerSystem.Reset \
+  -H 'Content-Type: application/json' \
+  -d '{"ResetType":"On"}'
+
+# Graceful shutdown
+curl -X POST http://10.0.0.136:8000/redfish/v1/Systems/1/Actions/ComputerSystem.Reset \
+  -H 'Content-Type: application/json' \
+  -d '{"ResetType":"GracefulShutdown"}'
+
+# Power cycle (graceful shutdown, then power on after 10s)
+curl -X POST http://10.0.0.136:8000/redfish/v1/Systems/1/Actions/ComputerSystem.Reset \
+  -H 'Content-Type: application/json' \
+  -d '{"ResetType":"ForceRestart"}'
+
+# Power status
+curl http://10.0.0.136:8000/redfish/v1/Systems/1
 ```
 
-**Available commands (stdin):**
+### Serial Console (SOL)
 
-```
-power on     — assert power button (transitions OFF → POWERING_ON → ON)
-power off    — assert power button (transitions ON → SHUTTING_DOWN → OFF)
-status       — print current power state
+```bash
+# Connect to host serial console (Ctrl+] to exit)
+sol
+# or
+sol 10.0.0.136
 ```
 
-**Example session:**
-
-```
-[  0.000] INFO : HAL RPi4 initialized (BCM2711 GPIO)
-[  0.005] INFO : UART initialized: /dev/ttyUSB0 @ 115200 baud
-[  0.005] INFO : MiniBMC started — state: OFF
-[  0.005] INFO : Commands: 'power on', 'power off', 'status'
-power on
-[  3.210] INFO : State: OFF -> POWERING_ON
-[  3.210] INFO : relay pressed (GPIO 17 HIGH, fd=6)
-[  3.210] INFO : Action: ASSERT power button
-[  3.714] INFO : State: POWERING_ON -> ON
-[  3.714] INFO : relay released (GPIO 17 LOW)
-[  3.714] INFO : Action: DEASSERT power button
-```
+`sol` is a shell alias for `python3 ~/Downloads/minibmc/redfish/sol-terminal.py`.
 
 ---
 
-## Systemd Service
+## Systemd Services
 
 ```bash
-# Install and enable as a system service
+# Install and enable services
 sudo cp minibmc.service /etc/systemd/system/
-sudo systemctl enable minibmc
-sudo systemctl start minibmc
-```
-
-```ini
-[Unit]
-Description=MiniBMC — Baseboard Management Controller
-After=dev-ttyUSB0.device
-Wants=dev-ttyUSB0.device
-
-[Service]
-ExecStart=/home/renzoval/minibmc/minibmc
-Environment=MINIBMC_UART=/dev/ttyUSB0
-Restart=on-failure
-User=root
-
-[Install]
-WantedBy=multi-user.target
+sudo cp minibmc-api.service /etc/systemd/system/
+sudo systemctl enable minibmc minibmc-api
+sudo systemctl start minibmc minibmc-api
 ```
 
 ---
@@ -212,20 +215,5 @@ WantedBy=multi-user.target
 ## Roadmap
 
 - [ ] Wire GPIO 18 to ATX POWER_GOOD signal for hardware state detection
-- [ ] Unix domain socket IPC for external command interface
-- [ ] Redfish-compatible REST API (Python/Flask) over the IPC layer
-- [ ] Networked SOL — stream host console over TCP/WebSocket
 - [ ] Hardware monitoring (temperature, fan speed via I2C/SPI)
 - [ ] IPMI over LAN support
-
----
-
-## Skills Demonstrated
-
-- **Embedded C** — bare-metal GPIO control via Linux gpiochip v2 API and memory-mapped BCM2711 registers
-- **Hardware Abstraction** — platform-independent HAL enabling identical logic across real hardware and simulation
-- **State Machine Design** — event-driven ATX power controller with timeout and error handling
-- **Systems Programming** — signal handling, mmap I/O, non-blocking UART, pseudo-terminals
-- **Ring Buffer** — circular byte buffer for non-blocking serial data capture
-- **Cross-platform Build** — Makefile with platform selection and cross-compilation support
-- **Unit Testing** — 20 tests with a custom assert framework, zero external dependencies
