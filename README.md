@@ -14,6 +14,10 @@ MiniBMC replicates this architecture using a Raspberry Pi 4 as the management co
 
 ## Architecture
 
+![System Architecture](docs/architecture.png)
+
+### Software Architecture
+
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                        main.c                           │
